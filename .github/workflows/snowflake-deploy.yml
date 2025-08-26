@@ -25,31 +25,43 @@ jobs:
           pip install --upgrade pip
           pip install "schemachange==4.0.1"
 
-      # Write connections.toml with your secrets (NO domain in account)
       - name: Configure Snowflake connection (connections.toml)
         run: |
           mkdir -p ~/.snowflake
           cat > ~/.snowflake/connections.toml << EOF
           [ci]
-          account   = "${{ secrets.SNOWFLAKE_ACCOUNT }}"   # e.g. ayvubxd-gmb14358 or ayvubxd-gmb14358.us-west-2
+          # e.g. ayvubxd-gmb14358 or ayvubxd-gmb14358.us-west-2 (NO .snowflakecomputing.com)
+          account   = "${{ secrets.SNOWFLAKE_ACCOUNT }}"
           user      = "${{ secrets.SNOWFLAKE_USER }}"
           role      = "${{ secrets.SNOWFLAKE_ROLE }}"
           warehouse = "${{ secrets.SNOWFLAKE_WAREHOUSE }}"
           database  = "${{ secrets.SNOWFLAKE_DATABASE }}"
           password  = "${{ secrets.SNOWFLAKE_PASSWORD }}"
           EOF
-          # fix perms/owner so the connector doesn't complain/ignore it
           chown "$(whoami)" ~/.snowflake/connections.toml
           chmod 600 ~/.snowflake/connections.toml
 
-      # Optional: fail early if any required secret is missing
+      # ✅ Safe validation: export secrets to env, then check with bash (no GitHub expressions inside loop)
       - name: Validate required secrets exist
+        env:
+          SNOWFLAKE_ACCOUNT:   ${{ secrets.SNOWFLAKE_ACCOUNT }}
+          SNOWFLAKE_USER:      ${{ secrets.SNOWFLAKE_USER }}
+          SNOWFLAKE_ROLE:      ${{ secrets.SNOWFLAKE_ROLE }}
+          SNOWFLAKE_WAREHOUSE: ${{ secrets.SNOWFLAKE_WAREHOUSE }}
+          SNOWFLAKE_DATABASE:  ${{ secrets.SNOWFLAKE_DATABASE }}
+          SNOWFLAKE_PASSWORD:  ${{ secrets.SNOWFLAKE_PASSWORD }}
         run: |
-          for v in SNOWFLAKE_ACCOUNT SNOWFLAKE_USER SNOWFLAKE_ROLE SNOWFLAKE_WAREHOUSE SNOWFLAKE_DATABASE SNOWFLAKE_PASSWORD; do
-            if [ -z "${{ secrets[$v] }}" ]; then
-              echo "❌ Missing secret: $v"; exit 1
+          missing=0
+          for name in SNOWFLAKE_ACCOUNT SNOWFLAKE_USER SNOWFLAKE_ROLE SNOWFLAKE_WAREHOUSE SNOWFLAKE_DATABASE SNOWFLAKE_PASSWORD; do
+            if [ -z "${!name}" ]; then
+              echo "❌ Missing secret: $name"
+              missing=1
             fi
           done
+          if [ "$missing" -ne 0 ]; then
+            exit 1
+          fi
+          echo "✅ All required secrets are present."
 
       - name: Dry Run (PRs)
         if: github.event_name == 'pull_request'
