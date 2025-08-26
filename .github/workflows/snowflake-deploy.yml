@@ -25,37 +25,46 @@ jobs:
           pip install --upgrade pip
           pip install "schemachange==4.0.1"
 
+      # Write connections.toml with your secrets (NO domain in account)
       - name: Configure Snowflake connection (connections.toml)
         run: |
           mkdir -p ~/.snowflake
-          cat > ~/.snowflake/connections.toml << 'EOF'
+          cat > ~/.snowflake/connections.toml << EOF
           [ci]
-          # Example for account: "ayvubxd-gmb14358" or "ayvubxd-gmb14358.us-west-2"
-          account   = "${{ secrets.SNOWFLAKE_ACCOUNT }}"
+          account   = "${{ secrets.SNOWFLAKE_ACCOUNT }}"   # e.g. ayvubxd-gmb14358 or ayvubxd-gmb14358.us-west-2
           user      = "${{ secrets.SNOWFLAKE_USER }}"
           role      = "${{ secrets.SNOWFLAKE_ROLE }}"
           warehouse = "${{ secrets.SNOWFLAKE_WAREHOUSE }}"
           database  = "${{ secrets.SNOWFLAKE_DATABASE }}"
           password  = "${{ secrets.SNOWFLAKE_PASSWORD }}"
           EOF
+          # fix perms/owner so the connector doesn't complain/ignore it
+          chown "$(whoami)" ~/.snowflake/connections.toml
+          chmod 600 ~/.snowflake/connections.toml
+
+      # Optional: fail early if any required secret is missing
+      - name: Validate required secrets exist
+        run: |
+          for v in SNOWFLAKE_ACCOUNT SNOWFLAKE_USER SNOWFLAKE_ROLE SNOWFLAKE_WAREHOUSE SNOWFLAKE_DATABASE SNOWFLAKE_PASSWORD; do
+            if [ -z "${{ secrets[$v] }}" ]; then
+              echo "❌ Missing secret: $v"; exit 1
+            fi
+          done
 
       - name: Dry Run (PRs)
         if: github.event_name == 'pull_request'
-        env:
-          SNOWFLAKE_DEFAULT_CONNECTION_NAME: ci
         run: |
           schemachange \
             -f migrations \
             -c "${{ secrets.SNOWFLAKE_DATABASE }}.PUBLIC.CHANGE_HISTORY" \
-            --dry-run \
-            --create-change-history-table
+            --create-change-history-table \
+            --connection-name ci
 
       - name: Deploy (push to main)
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        env:
-          SNOWFLAKE_DEFAULT_CONNECTION_NAME: ci
         run: |
           schemachange \
             -f migrations \
             -c "${{ secrets.SNOWFLAKE_DATABASE }}.PUBLIC.CHANGE_HISTORY" \
-            --create-change-history-table
+            --create-change-history-table \
+            --connection-name ci
