@@ -1,15 +1,11 @@
 # .github/workflows/snowflake-deploy.yml
-
 name: Snowflake Schema Deployment
 
 on:
   push:
-    branches:
-      - main
+    branches: [ main ]
   pull_request:
-    branches:
-      - main
-      - develop
+    branches: [ main, develop ]
 
 jobs:
   deploy-snowflake-changes:
@@ -17,27 +13,49 @@ jobs:
 
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: "3.10"
 
       - name: Install schemachange
-        run: pip install schemachange
+        run: |
+          pip install --upgrade pip
+          pip install "schemachange==4.0.1"
 
-      - name: Run schemachange (Dry Run for PR)
+      - name: Configure Snowflake connection (connections.toml)
+        run: |
+          mkdir -p ~/.snowflake
+          cat > ~/.snowflake/connections.toml << 'EOF'
+          [ci]
+          # Example for account: "ayvubxd-gmb14358" or "ayvubxd-gmb14358.us-west-2"
+          account   = "${{ secrets.SNOWFLAKE_ACCOUNT }}"
+          user      = "${{ secrets.SNOWFLAKE_USER }}"
+          role      = "${{ secrets.SNOWFLAKE_ROLE }}"
+          warehouse = "${{ secrets.SNOWFLAKE_WAREHOUSE }}"
+          database  = "${{ secrets.SNOWFLAKE_DATABASE }}"
+          password  = "${{ secrets.SNOWFLAKE_PASSWORD }}"
+          EOF
+
+      - name: Dry Run (PRs)
         if: github.event_name == 'pull_request'
-        run: |
-          schemachange -f migrations -a ${{ secrets.SNOWFLAKE_ACCOUNT }} -u ${{ secrets.SNOWFLAKE_USER }} -r ${{ secrets.SNOWFLAKE_ROLE }} -w ${{ secrets.SNOWFLAKE_WAREHOUSE }} -d ${{ secrets.SNOWFLAKE_DATABASE }} -c "${{ secrets.SNOWFLAKE_DATABASE }}.PUBLIC.CHANGE_HISTORY" --dry-run
         env:
-          SNOWFLAKE_PASSWORD: ${{ secrets.SNOWFLAKE_PASSWORD }}
+          SNOWFLAKE_DEFAULT_CONNECTION_NAME: ci
+        run: |
+          schemachange \
+            -f migrations \
+            -c "${{ secrets.SNOWFLAKE_DATABASE }}.PUBLIC.CHANGE_HISTORY" \
+            --dry-run \
+            --create-change-history-table
 
-      - name: Deploy schemachange (Merge to main)
+      - name: Deploy (push to main)
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        run: |
-          schemachange -f migrations -a ${{ secrets.SNOWFLAKE_ACCOUNT }} -u ${{ secrets.SNOWFLAKE_USER }} -r ${{ secrets.SNOWFLAKE_ROLE }} -w ${{ secrets.SNOWFLAKE_WAREHOUSE }} -d ${{ secrets.SNOWFLAKE_DATABASE }} -c "${{ secrets.SNOWFLAKE_DATABASE }}.PUBLIC.CHANGE_HISTORY"
         env:
-          SNOWFLAKE_PASSWORD: ${{ secrets.SNOWFLAKE_PASSWORD }}
-
+          SNOWFLAKE_DEFAULT_CONNECTION_NAME: ci
+        run: |
+          schemachange \
+            -f migrations \
+            -c "${{ secrets.SNOWFLAKE_DATABASE }}.PUBLIC.CHANGE_HISTORY" \
+            --create-change-history-table
