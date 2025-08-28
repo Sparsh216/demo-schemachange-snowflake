@@ -4,21 +4,21 @@ on:
   pull_request:
     branches: [ main, develop ]
   push:
-    branches: [ main ]
+    branches: [ main ]   # optional: run sandbox on direct pushes to main too
 
 permissions:
   contents: read
-  id-token: write   # needed for Azure OIDC if you use Key Vault
+  id-token: write   # required only if you enable Azure OIDC
 
 env:
-  # Toggle Key Vault usage via repo variable (Settings → Variables → Actions)
+  # Toggle Key Vault via repo variable (Settings → Variables → Actions)
   USE_AZURE_KEYVAULT: ${{ vars.USE_AZURE_KEYVAULT || 'false' }}
 
 jobs:
   sandbox:
-    # Do not run this job for PRs from forks (they have no access to your secrets)
-    if: ${{ github.event.pull_request.head.repo.fork == false }}
-    environment: PRD   # Uses DEV environment secrets
+    # On PRs: skip forks (they can't access your environment secrets). On push: always run.
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork == false }}
+    environment: DEV   # uses DEV environment secrets
     runs-on: ubuntu-latest
 
     steps:
@@ -35,7 +35,7 @@ jobs:
           pip install --upgrade pip
           pip install schemachange==4.0.1 snowflake-connector-python
 
-      # ---------- OPTIONAL: Azure Key Vault (controlled by repo variable) ----------
+      # ---------- OPTIONAL: Azure Key Vault (DEV only) ----------
       - name: Azure Login (OIDC)
         if: ${{ env.USE_AZURE_KEYVAULT == 'true' }}
         uses: azure/login@v2
@@ -44,10 +44,10 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
-      - name: Pull DEV secrets from Azure Key Vault
+      - name: Pull DEV secrets from Azure Key Vault (optional)
         if: ${{ env.USE_AZURE_KEYVAULT == 'true' }}
         id: kv
-        uses: azure/keyvault-secrets@v1
+        uses: Azure/get-keyvault-secrets@v1
         with:
           keyvault: ${{ secrets.AZURE_KEYVAULT_NAME }}
           secrets: |
@@ -58,7 +58,7 @@ jobs:
             sf-warehouse-dev
             sf-database-dev
 
-      # Resolve connection variables (KV wins; else fall back to DEV environment secrets)
+      # Resolve connection variables (Key Vault wins; else use DEV env secrets)
       - name: Resolve connection variables
         env:
           GH_SF_ACCOUNT: ${{ secrets.SF_ACCOUNT }}
@@ -68,20 +68,26 @@ jobs:
           GH_SF_WH:      ${{ secrets.SF_WH }}
           GH_SF_DB:      ${{ secrets.SF_DB }}
         run: |
-          echo "ACCOUNT_RESOLVED=${{ steps.kv.outputs.sf-account-dev || env.GH_SF_ACCOUNT }}" >> $GITHUB_ENV
-          echo "USER_RESOLVED=${{ steps.kv.outputs.sf-user-dev    || env.GH_SF_USER }}"     >> $GITHUB_ENV
-          echo "PWD_RESOLVED=${{ steps.kv.outputs.sf-password-dev || env.GH_SF_PWD }}"      >> $GITHUB_ENV
-          echo "ROLE_RESOLVED=${{ steps.kv.outputs.sf-role-dev    || env.GH_SF_ROLE }}"     >> $GITHUB_ENV
-          echo "WH_RESOLVED=${{ steps.kv.outputs.sf-warehouse-dev || env.GH_SF_WH }}"       >> $GITHUB_ENV
-          echo "DB_RESOLVED=${{ steps.kv.outputs.sf-database-dev  || env.GH_SF_DB }}"       >> $GITHUB_ENV
-          echo "::add-mask::${{ steps.kv.outputs.sf-password-dev || env.GH_SF_PWD }}"
+          acct="${{ steps.kv.outputs['sf-account-dev'] || env.GH_SF_ACCOUNT }}"
+          user="${{ steps.kv.outputs['sf-user-dev']    || env.GH_SF_USER }}"
+          pwd="${{ steps.kv.outputs['sf-password-dev'] || env.GH_SF_PWD }}"
+          role="${{ steps.kv.outputs['sf-role-dev']    || env.GH_SF_ROLE }}"
+          wh="${{ steps.kv.outputs['sf-warehouse-dev'] || env.GH_SF_WH }}"
+          db="${{ steps.kv.outputs['sf-database-dev']  || env.GH_SF_DB }}"
+
+          # Trim + export
+          for k in acct user pwd role wh db; do
+            v="$(eval echo \$$k | xargs)"
+            echo "::add-mask::$v"
+            echo "$(echo $k | tr a-z A-Z)_RESOLVED=$v" >> $GITHUB_ENV
+          done
 
       - name: Write connections.toml
         run: |
           mkdir -p ~/.snowflake
           cat > ~/.snowflake/connections.toml << EOF
           [ci]
-          account   = "${ACCOUNT_RESOLVED}"
+          account   = "${ACCT_RESOLVED}"
           user      = "${USER_RESOLVED}"
           role      = "${ROLE_RESOLVED}"
           warehouse = "${WH_RESOLVED}"
@@ -97,7 +103,7 @@ jobs:
           python - <<'PY'
           import os, snowflake.connector
           con = snowflake.connector.connect(
-            account=os.environ['ACCOUNT_RESOLVED'],
+            account=os.environ['ACCT_RESOLVED'],
             user=os.environ['USER_RESOLVED'],
             password=os.environ['PWD_RESOLVED'],
             warehouse=os.environ['WH_RESOLVED'],
@@ -132,7 +138,7 @@ jobs:
           python - <<'PY'
           import os, snowflake.connector
           con = snowflake.connector.connect(
-            account=os.environ['ACCOUNT_RESOLVED'],
+            account=os.environ['ACCT_RESOLVED'],
             user=os.environ['USER_RESOLVED'],
             password=os.environ['PWD_RESOLVED'],
             warehouse=os.environ['WH_RESOLVED'],
