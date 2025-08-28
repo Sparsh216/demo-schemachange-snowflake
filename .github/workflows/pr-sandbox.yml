@@ -4,11 +4,11 @@ on:
   pull_request:
     branches: [ main, develop ]
   push:
-    branches: [ main ]   # optional: run sandbox on direct pushes to main too
+    branches: [ main ]   # optional: also validate merges to main
 
 permissions:
   contents: read
-  id-token: write   # required only if you enable Azure OIDC
+  id-token: write   # only used if you enable Azure OIDC for Key Vault
 
 env:
   # Toggle Key Vault via repo variable (Settings → Variables → Actions)
@@ -16,7 +16,7 @@ env:
 
 jobs:
   sandbox:
-    # On PRs: skip forks (they can't access your environment secrets). On push: always run.
+    # On PRs: skip if PR is from a fork (no secrets available). On push: always run.
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork == false }}
     environment: DEV   # uses DEV environment secrets
     runs-on: ubuntu-latest
@@ -75,10 +75,10 @@ jobs:
           wh="${{ steps.kv.outputs['sf-warehouse-dev'] || env.GH_SF_WH }}"
           db="${{ steps.kv.outputs['sf-database-dev']  || env.GH_SF_DB }}"
 
-          # Trim + export
+          # Trim + export, and mask sensitive values
           for k in acct user pwd role wh db; do
             v="$(eval echo \$$k | xargs)"
-            echo "::add-mask::$v"
+            [ "$k" = "pwd" ] && echo "::add-mask::$v"
             echo "$(echo $k | tr a-z A-Z)_RESOLVED=$v" >> $GITHUB_ENV
           done
 
@@ -96,10 +96,17 @@ jobs:
           EOF
           chmod 600 ~/.snowflake/connections.toml
 
-      - name: Create sandbox DB
+      # Compute sandbox DB name and expose it to later steps
+      - name: Compute sandbox name
+        id: names
         run: |
           ts=$(date +%Y%m%d%H%M%S)
-          echo "SANDBOX_DB=SBX_${ts}_${GITHUB_RUN_ID}" >> $GITHUB_ENV
+          echo "db=SBX_${ts}_${GITHUB_RUN_ID}" >> "$GITHUB_OUTPUT"
+
+      - name: Create sandbox DB
+        env:
+          SANDBOX_DB: ${{ steps.names.outputs.db }}
+        run: |
           python - <<'PY'
           import os, snowflake.connector
           con = snowflake.connector.connect(
@@ -110,12 +117,15 @@ jobs:
             role=os.environ['ROLE_RESOLVED'],
           )
           cs = con.cursor()
-          cs.execute(f"CREATE DATABASE IF NOT EXISTS {os.environ['SANDBOX_DB']}")
-          cs.execute(f"CREATE SCHEMA IF NOT EXISTS {os.environ['SANDBOX_DB']}.PUBLIC")
+          db = os.environ['SANDBOX_DB']
+          cs.execute(f"CREATE DATABASE IF NOT EXISTS {db}")
+          cs.execute(f"CREATE SCHEMA IF NOT EXISTS {db}.PUBLIC")
           cs.close(); con.close()
           PY
 
       - name: Dry run in sandbox
+        env:
+          SANDBOX_DB: ${{ steps.names.outputs.db }}
         run: |
           schemachange \
             -f migrations \
@@ -125,6 +135,8 @@ jobs:
             --connection-name ci
 
       - name: Apply to sandbox
+        env:
+          SANDBOX_DB: ${{ steps.names.outputs.db }}
         run: |
           schemachange \
             -f migrations \
@@ -134,6 +146,8 @@ jobs:
 
       - name: Teardown sandbox (always)
         if: always()
+        env:
+          SANDBOX_DB: ${{ steps.names.outputs.db }}
         run: |
           python - <<'PY'
           import os, snowflake.connector
