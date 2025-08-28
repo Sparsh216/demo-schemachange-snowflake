@@ -126,8 +126,10 @@ jobs:
           )
           db = os.environ['DB_RESOLVED']
           cs = con.cursor()
-          cs.execute("SET TS := TO_TIMESTAMP_LTZ(CURRENT_TIMESTAMP())")
+          cs.execute("SET TS = TO_TIMESTAMP_LTZ(CURRENT_TIMESTAMP())")  # <-- use '='
           cs.execute(f"CREATE OR REPLACE DATABASE {db}_PREDEPLOY_CLONE CLONE {db}")
+          # Example using the variable later:
+          # cs.execute(f\"CREATE OR REPLACE DATABASE {db}_ROLLBACK CLONE {db} AT (TIMESTAMP => $TS)\")
           cs.close(); con.close()
           PY
 
