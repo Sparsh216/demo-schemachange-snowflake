@@ -6,11 +6,17 @@ on:
 
 permissions:
   contents: read
-  id-token: write   # needed if you use Azure OIDC login
+  id-token: write   # needed for Azure OIDC if you use Key Vault
+
+env:
+  # Toggle Key Vault usage via repo variable (Settings → Variables → Actions)
+  USE_AZURE_KEYVAULT: ${{ vars.USE_AZURE_KEYVAULT || 'false' }}
 
 jobs:
   sandbox:
-    environment: DEV         # uses DEV environment secrets (and DEV KV secrets if configured)
+    # Do not run this job for PRs from forks (they have no access to your secrets)
+    if: ${{ github.event.pull_request.head.repo.fork == false }}
+    environment: DEV   # Uses DEV environment secrets
     runs-on: ubuntu-latest
 
     steps:
@@ -27,9 +33,9 @@ jobs:
           pip install --upgrade pip
           pip install schemachange==4.0.1 snowflake-connector-python
 
-      # ---------- OPTIONAL: Azure Key Vault (if configured in repo/org secrets) ----------
+      # ---------- OPTIONAL: Azure Key Vault (controlled by repo variable) ----------
       - name: Azure Login (OIDC)
-        if: ${{ secrets.AZURE_CLIENT_ID != '' }}
+        if: ${{ env.USE_AZURE_KEYVAULT == 'true' }}
         uses: azure/login@v2
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
@@ -37,7 +43,7 @@ jobs:
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
       - name: Pull DEV secrets from Azure Key Vault
-        if: ${{ secrets.AZURE_CLIENT_ID != '' }}
+        if: ${{ env.USE_AZURE_KEYVAULT == 'true' }}
         id: kv
         uses: azure/keyvault-secrets@v1
         with:
@@ -50,7 +56,8 @@ jobs:
             sf-warehouse-dev
             sf-database-dev
 
-      - name: Resolve connection variables (KV wins; else env secrets)
+      # Resolve connection variables (KV wins; else fall back to DEV environment secrets)
+      - name: Resolve connection variables
         env:
           GH_SF_ACCOUNT: ${{ secrets.SF_ACCOUNT }}
           GH_SF_USER:    ${{ secrets.SF_USER }}
