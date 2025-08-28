@@ -1,0 +1,135 @@
+name: PR Sandbox — Snowflake
+
+on:
+  pull_request:
+    branches: [ main, develop ]
+
+permissions:
+  contents: read
+  id-token: write   # needed if you use Azure OIDC login
+
+jobs:
+  sandbox:
+    environment: DEV         # uses DEV environment secrets (and DEV KV secrets if configured)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install schemachange==4.0.1 snowflake-connector-python
+
+      # ---------- OPTIONAL: Azure Key Vault (if configured in repo/org secrets) ----------
+      - name: Azure Login (OIDC)
+        if: ${{ secrets.AZURE_CLIENT_ID != '' }}
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Pull DEV secrets from Azure Key Vault
+        if: ${{ secrets.AZURE_CLIENT_ID != '' }}
+        id: kv
+        uses: azure/keyvault-secrets@v1
+        with:
+          keyvault: ${{ secrets.AZURE_KEYVAULT_NAME }}
+          secrets: |
+            sf-account-dev
+            sf-user-dev
+            sf-password-dev
+            sf-role-dev
+            sf-warehouse-dev
+            sf-database-dev
+
+      - name: Resolve connection variables (KV wins; else env secrets)
+        env:
+          GH_SF_ACCOUNT: ${{ secrets.SF_ACCOUNT }}
+          GH_SF_USER:    ${{ secrets.SF_USER }}
+          GH_SF_PWD:     ${{ secrets.SF_PWD }}
+          GH_SF_ROLE:    ${{ secrets.SF_ROLE }}
+          GH_SF_WH:      ${{ secrets.SF_WH }}
+          GH_SF_DB:      ${{ secrets.SF_DB }}
+        run: |
+          echo "ACCOUNT_RESOLVED=${{ steps.kv.outputs.sf-account-dev || env.GH_SF_ACCOUNT }}" >> $GITHUB_ENV
+          echo "USER_RESOLVED=${{ steps.kv.outputs.sf-user-dev    || env.GH_SF_USER }}"     >> $GITHUB_ENV
+          echo "PWD_RESOLVED=${{ steps.kv.outputs.sf-password-dev || env.GH_SF_PWD }}"      >> $GITHUB_ENV
+          echo "ROLE_RESOLVED=${{ steps.kv.outputs.sf-role-dev    || env.GH_SF_ROLE }}"     >> $GITHUB_ENV
+          echo "WH_RESOLVED=${{ steps.kv.outputs.sf-warehouse-dev || env.GH_SF_WH }}"       >> $GITHUB_ENV
+          echo "DB_RESOLVED=${{ steps.kv.outputs.sf-database-dev  || env.GH_SF_DB }}"       >> $GITHUB_ENV
+          echo "::add-mask::${{ steps.kv.outputs.sf-password-dev || env.GH_SF_PWD }}"
+
+      - name: Write connections.toml
+        run: |
+          mkdir -p ~/.snowflake
+          cat > ~/.snowflake/connections.toml << EOF
+          [ci]
+          account   = "${ACCOUNT_RESOLVED}"
+          user      = "${USER_RESOLVED}"
+          role      = "${ROLE_RESOLVED}"
+          warehouse = "${WH_RESOLVED}"
+          database  = "${DB_RESOLVED}"
+          password  = "${PWD_RESOLVED}"
+          EOF
+          chmod 600 ~/.snowflake/connections.toml
+
+      - name: Create sandbox DB
+        run: |
+          ts=$(date +%Y%m%d%H%M%S)
+          echo "SANDBOX_DB=SBX_${ts}_${GITHUB_RUN_ID}" >> $GITHUB_ENV
+          python - <<'PY'
+          import os, snowflake.connector
+          con = snowflake.connector.connect(
+            account=os.environ['ACCOUNT_RESOLVED'],
+            user=os.environ['USER_RESOLVED'],
+            password=os.environ['PWD_RESOLVED'],
+            warehouse=os.environ['WH_RESOLVED'],
+            role=os.environ['ROLE_RESOLVED'],
+          )
+          cs = con.cursor()
+          cs.execute(f"CREATE DATABASE IF NOT EXISTS {os.environ['SANDBOX_DB']}")
+          cs.execute(f"CREATE SCHEMA IF NOT EXISTS {os.environ['SANDBOX_DB']}.PUBLIC")
+          cs.close(); con.close()
+          PY
+
+      - name: Dry run in sandbox
+        run: |
+          schemachange \
+            -f migrations \
+            -c "${SANDBOX_DB}.PUBLIC.CHANGE_HISTORY" \
+            --dry-run \
+            --create-change-history-table \
+            --connection-name ci
+
+      - name: Apply to sandbox
+        run: |
+          schemachange \
+            -f migrations \
+            -c "${SANDBOX_DB}.PUBLIC.CHANGE_HISTORY" \
+            --create-change-history-table \
+            --connection-name ci
+
+      - name: Teardown sandbox (always)
+        if: always()
+        run: |
+          python - <<'PY'
+          import os, snowflake.connector
+          con = snowflake.connector.connect(
+            account=os.environ['ACCOUNT_RESOLVED'],
+            user=os.environ['USER_RESOLVED'],
+            password=os.environ['PWD_RESOLVED'],
+            warehouse=os.environ['WH_RESOLVED'],
+            role=os.environ['ROLE_RESOLVED'],
+          )
+          cs = con.cursor()
+          cs.execute(f"DROP DATABASE IF EXISTS {os.environ['SANDBOX_DB']}")
+          cs.close(); con.close()
+          PY
