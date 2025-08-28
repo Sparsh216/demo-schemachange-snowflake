@@ -16,7 +16,7 @@ jobs:
   sandbox:
     # Do not run this job for PRs from forks (they have no access to your secrets)
     if: ${{ github.event.pull_request.head.repo.fork == false }}
-    environment: DEV   # Uses DEV environment secrets
+    environment: PRD   # Uses DEV environment secrets
     runs-on: ubuntu-latest
 
     steps:
